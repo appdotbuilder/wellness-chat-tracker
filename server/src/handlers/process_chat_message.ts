@@ -1,8 +1,424 @@
-
 import { db } from '../db';
-import { chatMessagesTable, activitiesTable, nutritionTable, hydrationTable, sleepTable, wellbeingTable } from '../db/schema';
+import { chatMessagesTable } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { type ChatMessage } from '../schema';
+import { createActivity } from './create_activity';
+import { createNutrition } from './create_nutrition';
+import { createHydration } from './create_hydration';
+import { createSleep } from './create_sleep';
+import { createWellbeing } from './create_wellbeing';
+import { createChatMessage } from './create_chat_message';
+import { generateRecommendations } from './generate_recommendations';
+
+// Helper functions for parsing different types of data
+const parseActivityData = (message: string, userId: number) => {
+  const activities: Array<{
+    activity_type: string;
+    duration_minutes: number;
+    calories_burned?: number;
+    intensity?: 'low' | 'moderate' | 'high';
+    notes?: string;
+  }> = [];
+
+  // Pattern 1: Duration-based activities
+  const durationPatterns = [
+    { pattern: /ran for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'running', intensity: 'moderate' },
+    { pattern: /walked for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'walking', intensity: 'low' },
+    { pattern: /cycled for (\d+(?:\.\d+)?)\s*(?:hours?|hrs?)/i, type: 'cycling', intensity: 'moderate', isHours: true },
+    { pattern: /cycled for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'cycling', intensity: 'moderate' },
+    { pattern: /(?:did|had)\s+a\s+(\d+)(?:-|\s)minute\s+workout/i, type: 'workout', intensity: 'moderate' },
+    { pattern: /exercised for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'exercise', intensity: 'moderate' },
+    { pattern: /swam for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'swimming', intensity: 'high' },
+    { pattern: /worked out for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'workout', intensity: 'moderate' }
+  ];
+
+  for (const { pattern, type, intensity, isHours } of durationPatterns) {
+    const match = message.match(pattern);
+    if (match) {
+      const duration = parseFloat(match[1]);
+      const durationMinutes = isHours ? duration * 60 : duration;
+      activities.push({
+        activity_type: type,
+        duration_minutes: Math.round(durationMinutes),
+        intensity: intensity as 'low' | 'moderate' | 'high',
+        notes: `Logged via chat: "${message.trim()}"`
+      });
+    }
+  }
+
+  // Pattern 2: Calorie-based activities
+  const caloriePattern = /(?:burned|burnt)\s+(\d+)\s*calories?\s+(?:playing|doing)?\s*(.+)/i;
+  const calorieMatch = message.match(caloriePattern);
+  if (calorieMatch) {
+    const calories = parseInt(calorieMatch[1]);
+    const activityDesc = calorieMatch[2].trim();
+    let activityType = 'exercise';
+    let intensity: 'low' | 'moderate' | 'high' = 'moderate';
+
+    // Determine activity type from description
+    if (activityDesc.includes('basketball') || activityDesc.includes('tennis') || activityDesc.includes('soccer')) {
+      activityType = 'sports';
+      intensity = 'high';
+    } else if (activityDesc.includes('walking')) {
+      activityType = 'walking';
+      intensity = 'low';
+    } else if (activityDesc.includes('running')) {
+      activityType = 'running';
+      intensity = 'high';
+    }
+
+    // Estimate duration based on calories (rough estimate: 10 calories per minute for moderate activity)
+    const estimatedDuration = Math.round(calories / 10);
+
+    activities.push({
+      activity_type: activityType,
+      duration_minutes: estimatedDuration,
+      calories_burned: calories,
+      intensity: intensity,
+      notes: `Logged via chat: "${message.trim()}"`
+    });
+  }
+
+  return activities.map(activity => ({
+    user_id: userId,
+    ...activity,
+    recorded_at: new Date()
+  }));
+};
+
+const parseNutritionData = (message: string, userId: number) => {
+  const nutritionEntries: Array<{
+    meal_type: 'breakfast' | 'lunch' | 'dinner' | 'snack';
+    food_item: string;
+    quantity: string;
+    calories?: number;
+    notes?: string;
+  }> = [];
+
+  // Pattern 1: Meal descriptions
+  const mealPatterns = [
+    { pattern: /had (breakfast)(\s+with|\s+of)?\s+(.+)/i, mealType: 'breakfast' as const },
+    { pattern: /ate (.+) for (breakfast)/i, mealType: 'breakfast' as const, reversed: true },
+    { pattern: /had (lunch)(\s+with|\s+of)?\s+(.+)/i, mealType: 'lunch' as const },
+    { pattern: /ate (.+) for (lunch)/i, mealType: 'lunch' as const, reversed: true },
+    { pattern: /(?:had |ate )?(?:dinner|supper)(?:\s+was|\s+of)?\s+(.+)/i, mealType: 'dinner' as const, foodGroup: 1 },
+    { pattern: /ate (.+) for (?:dinner|supper)/i, mealType: 'dinner' as const, reversed: true },
+    { pattern: /(?:had|ate)\s+a\s+snack:?\s*(.+)/i, mealType: 'snack' as const, foodGroup: 1 },
+    { pattern: /snacked on (.+)/i, mealType: 'snack' as const, foodGroup: 1 }
+  ];
+
+  for (const { pattern, mealType, reversed, foodGroup } of mealPatterns) {
+    const match = message.match(pattern);
+    if (match) {
+      let foodItem: string;
+      if (foodGroup) {
+        foodItem = match[foodGroup].trim();
+      } else if (reversed) {
+        foodItem = match[1].trim();
+      } else {
+        // For patterns like "had breakfast with eggs and toast"
+        // match[1] = "breakfast", match[2] = "with" or undefined, match[3] = "eggs and toast"
+        const connector = match[2] || '';
+        const food = match[3].trim();
+        foodItem = connector ? `${connector.trim()} ${food}` : food;
+      }
+
+      nutritionEntries.push({
+        meal_type: mealType,
+        food_item: foodItem,
+        quantity: '1 serving',
+        notes: `Logged via chat: "${message.trim()}"`
+      });
+    }
+  }
+
+  // Pattern 2: Calorie tracking
+  const caloriePattern = /consumed (\d+) calories/i;
+  const calorieMatch = message.match(caloriePattern);
+  if (calorieMatch) {
+    const calories = parseInt(calorieMatch[1]);
+    
+    // Determine meal type based on time or context
+    let mealType: 'breakfast' | 'lunch' | 'dinner' | 'snack' = 'snack';
+    if (message.includes('breakfast')) mealType = 'breakfast';
+    else if (message.includes('lunch')) mealType = 'lunch';
+    else if (message.includes('dinner')) mealType = 'dinner';
+
+    nutritionEntries.push({
+      meal_type: mealType,
+      food_item: 'meal',
+      quantity: '1 serving',
+      calories: calories,
+      notes: `Logged via chat: "${message.trim()}"`
+    });
+  }
+
+  return nutritionEntries.map(entry => ({
+    user_id: userId,
+    ...entry,
+    recorded_at: new Date()
+  }));
+};
+
+const parseHydrationData = (message: string, userId: number) => {
+  const hydrationEntries: Array<{
+    amount_ml: number;
+    beverage_type?: string;
+  }> = [];
+
+  // Pattern 1: Direct ml measurements
+  const mlPatterns = [
+    /drank (\d+)ml of (.+)/i,
+    /had (\d+)ml (?:of )?(.+)/i,
+    /consumed (\d+)ml (?:of )?(.+)/i
+  ];
+
+  for (const pattern of mlPatterns) {
+    const match = message.match(pattern);
+    if (match) {
+      const amount = parseInt(match[1]);
+      const beverage = match[2].trim();
+      hydrationEntries.push({
+        amount_ml: amount,
+        beverage_type: beverage
+      });
+    }
+  }
+
+  // Pattern 2: Liter measurements
+  const literPatterns = [
+    /drank (\d+(?:\.\d+)?)\s*(?:liters?|litres?|l) of (.+)/i,
+    /had (\d+(?:\.\d+)?)\s*(?:liters?|litres?|l) (?:of )?(.+)/i
+  ];
+
+  for (const pattern of literPatterns) {
+    const match = message.match(pattern);
+    if (match) {
+      const liters = parseFloat(match[1]);
+      const beverage = match[2].trim();
+      hydrationEntries.push({
+        amount_ml: Math.round(liters * 1000),
+        beverage_type: beverage
+      });
+    }
+  }
+
+  // Pattern 3: Glass measurements (assuming 250ml per glass)
+  const glassPattern = /(?:had|drank) (\d+) glasses? (?:of )?(.+)/i;
+  const glassMatch = message.match(glassPattern);
+  if (glassMatch) {
+    const glasses = parseInt(glassMatch[1]);
+    const beverage = glassMatch[2].trim();
+    hydrationEntries.push({
+      amount_ml: glasses * 250,
+      beverage_type: beverage
+    });
+  }
+
+  // Pattern 4: Just water without specifying amount (default to 250ml)
+  if (message.includes('drank water') && hydrationEntries.length === 0) {
+    hydrationEntries.push({
+      amount_ml: 250,
+      beverage_type: 'water'
+    });
+  }
+
+  return hydrationEntries.map(entry => ({
+    user_id: userId,
+    ...entry,
+    recorded_at: new Date()
+  }));
+};
+
+const parseSleepData = (message: string, userId: number) => {
+  const sleepEntries: Array<{
+    bedtime: Date;
+    wake_time: Date;
+    sleep_quality?: 'poor' | 'fair' | 'good' | 'excellent';
+    notes?: string;
+  }> = [];
+
+  const now = new Date();
+
+  // Pattern 1: Sleep duration
+  const durationPatterns = [
+    /slept for (\d+(?:\.\d+)?)\s*hours?/i,
+    /got (\d+(?:\.\d+)?)\s*hours? of sleep/i
+  ];
+
+  for (const pattern of durationPatterns) {
+    const match = message.match(pattern);
+    if (match) {
+      const hours = parseFloat(match[1]);
+      const bedtime = new Date(now.getTime() - hours * 60 * 60 * 1000);
+      sleepEntries.push({
+        bedtime: bedtime,
+        wake_time: now,
+        notes: `Logged via chat: "${message.trim()}"`
+      });
+    }
+  }
+
+  // Pattern 2: Sleep quality
+  const qualityPattern = /sleep quality was (poor|fair|good|excellent)/i;
+  const qualityMatch = message.match(qualityPattern);
+  if (qualityMatch) {
+    const quality = qualityMatch[1].toLowerCase() as 'poor' | 'fair' | 'good' | 'excellent';
+    
+    if (sleepEntries.length > 0) {
+      sleepEntries[0].sleep_quality = quality;
+    } else {
+      // Create a default 8-hour sleep entry with quality
+      const bedtime = new Date(now.getTime() - 8 * 60 * 60 * 1000);
+      sleepEntries.push({
+        bedtime: bedtime,
+        wake_time: now,
+        sleep_quality: quality,
+        notes: `Logged via chat: "${message.trim()}"`
+      });
+    }
+  }
+
+  // Pattern 3: Bedtime and wake time
+  const timePattern = /went to bed at (\d+)(?::(\d+))?\s*(am|pm) and woke up at (\d+)(?::(\d+))?\s*(am|pm)/i;
+  const timeMatch = message.match(timePattern);
+  if (timeMatch) {
+    const bedHour = parseInt(timeMatch[1]);
+    const bedMinute = parseInt(timeMatch[2] || '0');
+    const bedAmPm = timeMatch[3].toLowerCase();
+    const wakeHour = parseInt(timeMatch[4]);
+    const wakeMinute = parseInt(timeMatch[5] || '0');
+    const wakeAmPm = timeMatch[6].toLowerCase();
+
+    // Convert to 24-hour format
+    let bed24Hour = bedHour;
+    if (bedAmPm === 'pm' && bedHour !== 12) bed24Hour += 12;
+    if (bedAmPm === 'am' && bedHour === 12) bed24Hour = 0;
+
+    let wake24Hour = wakeHour;
+    if (wakeAmPm === 'pm' && wakeHour !== 12) wake24Hour += 12;
+    if (wakeAmPm === 'am' && wakeHour === 12) wake24Hour = 0;
+
+    const bedtime = new Date(now);
+    bedtime.setHours(bed24Hour, bedMinute, 0, 0);
+    
+    const wakeTime = new Date(now);
+    wakeTime.setHours(wake24Hour, wakeMinute, 0, 0);
+
+    // If wake time is earlier than bedtime, assume wake time is next day
+    if (wakeTime <= bedtime) {
+      wakeTime.setDate(wakeTime.getDate() + 1);
+    }
+
+    sleepEntries.push({
+      bedtime: bedtime,
+      wake_time: wakeTime,
+      notes: `Logged via chat: "${message.trim()}"`
+    });
+  }
+
+  return sleepEntries.map(entry => ({
+    user_id: userId,
+    ...entry,
+    recorded_at: new Date()
+  }));
+};
+
+const parseWellbeingData = (message: string, userId: number) => {
+  const wellbeingEntries: Array<{
+    mood: 'very_poor' | 'poor' | 'neutral' | 'good' | 'excellent';
+    stress_level: 'very_low' | 'low' | 'moderate' | 'high' | 'very_high';
+    energy_level: 'very_low' | 'low' | 'moderate' | 'high' | 'very_high';
+    notes?: string;
+  }> = [];
+
+  // Default values
+  let mood: 'very_poor' | 'poor' | 'neutral' | 'good' | 'excellent' = 'neutral';
+  let stressLevel: 'very_low' | 'low' | 'moderate' | 'high' | 'very_high' = 'moderate';
+  let energyLevel: 'very_low' | 'low' | 'moderate' | 'high' | 'very_high' = 'moderate';
+  let dataFound = false;
+
+  // Mood patterns
+  const moodPatterns = [
+    { pattern: /feeling (very_poor|very poor|terrible|awful)/i, value: 'very_poor' as const },
+    { pattern: /feeling (poor|bad|sad|down)/i, value: 'poor' as const },
+    { pattern: /feeling (neutral|okay|ok|fine|average)/i, value: 'neutral' as const },
+    { pattern: /feeling (good|great|happy|positive)/i, value: 'good' as const },
+    { pattern: /feeling (excellent|amazing|fantastic|wonderful|very good)/i, value: 'excellent' as const },
+    { pattern: /mood is (very_poor|very poor|terrible|awful)/i, value: 'very_poor' as const },
+    { pattern: /mood is (poor|bad|sad|down)/i, value: 'poor' as const },
+    { pattern: /mood is (neutral|okay|ok|fine|average)/i, value: 'neutral' as const },
+    { pattern: /mood is (good|great|happy|positive)/i, value: 'good' as const },
+    { pattern: /mood is (excellent|amazing|fantastic|wonderful|very good)/i, value: 'excellent' as const }
+  ];
+
+  for (const { pattern, value } of moodPatterns) {
+    if (message.match(pattern)) {
+      mood = value;
+      dataFound = true;
+      break;
+    }
+  }
+
+  // Stress level patterns
+  const stressPatterns = [
+    { pattern: /stress level is (very_low|very low|minimal|none)/i, value: 'very_low' as const },
+    { pattern: /stress level is (low|little|slight)/i, value: 'low' as const },
+    { pattern: /stress level is (moderate|medium|average|okay)/i, value: 'moderate' as const },
+    { pattern: /stress level is (high|stressed|anxious)/i, value: 'high' as const },
+    { pattern: /stress level is (very_high|very high|extremely high|overwhelming)/i, value: 'very_high' as const }
+  ];
+
+  for (const { pattern, value } of stressPatterns) {
+    if (message.match(pattern)) {
+      stressLevel = value;
+      dataFound = true;
+      break;
+    }
+  }
+
+  // Energy level patterns
+  const energyPatterns = [
+    { pattern: /energy level is (very_low|very low|exhausted|drained)/i, value: 'very_low' as const },
+    { pattern: /energy level is (low|tired|sluggish)/i, value: 'low' as const },
+    { pattern: /energy level is (moderate|medium|average|okay)/i, value: 'moderate' as const },
+    { pattern: /energy level is (high|energetic|active)/i, value: 'high' as const },
+    { pattern: /energy level is (very_high|very high|extremely high|pumped)/i, value: 'very_high' as const }
+  ];
+
+  for (const { pattern, value } of energyPatterns) {
+    if (message.match(pattern)) {
+      energyLevel = value;
+      dataFound = true;
+      break;
+    }
+  }
+
+  if (dataFound) {
+    wellbeingEntries.push({
+      mood: mood,
+      stress_level: stressLevel,
+      energy_level: energyLevel,
+      notes: `Logged via chat: "${message.trim()}"`
+    });
+  }
+
+  return wellbeingEntries.map(entry => ({
+    user_id: userId,
+    ...entry,
+    recorded_at: new Date()
+  }));
+};
+
+const isRecommendationRequest = (message: string): boolean => {
+  const recommendationKeywords = [
+    'recommendations', 'recommend', 'advise', 'advice', 'suggest', 'suggestions',
+    'what should i do', 'help me improve', 'tips', 'guidance', 'what can i do'
+  ];
+  
+  const lowerMessage = message.toLowerCase();
+  return recommendationKeywords.some(keyword => lowerMessage.includes(keyword));
+};
 
 export const processChatMessage = async (messageId: number): Promise<ChatMessage> => {
   try {
@@ -26,186 +442,126 @@ export const processChatMessage = async (messageId: number): Promise<ChatMessage
       };
     }
 
-    const messageText = message.message.toLowerCase();
+    const messageText = message.message;
+    const lowerMessageText = messageText.toLowerCase();
     let dataExtracted = false;
+    const extractedData: string[] = [];
 
-    // Extract activity data - look for exercise/activity keywords
-    const activityPatterns = [
-      /ran for (\d+) minutes?/,
-      /walked for (\d+) minutes?/,
-      /exercised for (\d+) minutes?/,
-      /worked out for (\d+) minutes?/,
-      /cycled for (\d+) minutes?/,
-      /swam for (\d+) minutes?/
-    ];
-
-    for (const pattern of activityPatterns) {
-      const match = messageText.match(pattern);
-      if (match) {
-        const duration = parseInt(match[1]);
-        const activityType = messageText.includes('ran') ? 'running' :
-                           messageText.includes('walked') ? 'walking' :
-                           messageText.includes('cycled') ? 'cycling' :
-                           messageText.includes('swam') ? 'swimming' :
-                           'exercise';
-
-        await db.insert(activitiesTable).values({
-          user_id: message.user_id,
-          activity_type: activityType,
-          duration_minutes: duration,
-          recorded_at: new Date()
-        }).execute();
-
-        dataExtracted = true;
-        break;
-      }
-    }
-
-    // Extract nutrition data - look for food/meal keywords
-    const nutritionPatterns = [
-      /had (breakfast|lunch|dinner) (.+)/,
-      /ate (.+) for (breakfast|lunch|dinner)/,
-      /consumed (\d+) calories/
-    ];
-
-    for (const pattern of nutritionPatterns) {
-      const match = messageText.match(pattern);
-      if (match) {
-        if (pattern.source.includes('calories')) {
-          // Calorie tracking
-          const calories = parseInt(match[1]);
-          await db.insert(nutritionTable).values({
-            user_id: message.user_id,
-            meal_type: 'snack',
-            food_item: 'meal',
-            quantity: '1 serving',
-            calories: calories,
-            recorded_at: new Date()
-          }).execute();
-        } else {
-          // Meal tracking
-          const mealType = (match[1] === 'breakfast' || match[1] === 'lunch' || match[1] === 'dinner') ? match[1] : match[2];
-          const foodItem = (match[1] === 'breakfast' || match[1] === 'lunch' || match[1] === 'dinner') ? match[2] : match[1];
-          
-          await db.insert(nutritionTable).values({
-            user_id: message.user_id,
-            meal_type: mealType as 'breakfast' | 'lunch' | 'dinner',
-            food_item: foodItem.trim(),
-            quantity: '1 serving',
-            recorded_at: new Date()
-          }).execute();
-        }
-
-        dataExtracted = true;
-        break;
-      }
-    }
-
-    // Extract hydration data - look for water/drink keywords
-    const hydrationPatterns = [
-      /drank (\d+)ml of (.+)/,
-      /had (\d+)ml (.+)/,
-      /consumed (\d+)ml water/
-    ];
-
-    for (const pattern of hydrationPatterns) {
-      const match = messageText.match(pattern);
-      if (match) {
-        const amount = parseInt(match[1]);
-        const beverageType = match[2] || 'water';
-
-        await db.insert(hydrationTable).values({
-          user_id: message.user_id,
-          amount_ml: amount,
-          beverage_type: beverageType.trim(),
-          recorded_at: new Date()
-        }).execute();
-
-        dataExtracted = true;
-        break;
-      }
-    }
-
-    // Extract sleep data - look for sleep keywords
-    const sleepPatterns = [
-      /slept for (\d+) hours?/,
-      /got (\d+) hours? of sleep/,
-      /sleep quality was (poor|fair|good|excellent)/
-    ];
-
-    for (const pattern of sleepPatterns) {
-      const match = messageText.match(pattern);
-      if (match) {
-        if (pattern.source.includes('quality')) {
-          // Sleep quality tracking - create basic sleep record
-          const quality = match[1] as 'poor' | 'fair' | 'good' | 'excellent';
-          const now = new Date();
-          const bedtime = new Date(now.getTime() - 8 * 60 * 60 * 1000); // 8 hours ago
-          
-          await db.insert(sleepTable).values({
-            user_id: message.user_id,
-            bedtime: bedtime,
-            wake_time: now,
-            sleep_duration_hours: 8,
-            sleep_quality: quality,
-            recorded_at: new Date()
-          }).execute();
-        } else {
-          // Sleep duration tracking
-          const hours = parseInt(match[1]);
-          const now = new Date();
-          const bedtime = new Date(now.getTime() - hours * 60 * 60 * 1000);
-          
-          await db.insert(sleepTable).values({
-            user_id: message.user_id,
-            bedtime: bedtime,
-            wake_time: now,
-            sleep_duration_hours: hours,
-            recorded_at: new Date()
-          }).execute();
-        }
-
-        dataExtracted = true;
-        break;
-      }
-    }
-
-    // Extract wellbeing data - look for mood/stress/energy keywords
-    const wellbeingPatterns = [
-      /feeling (very_poor|poor|neutral|good|excellent)/,
-      /mood is (very_poor|poor|neutral|good|excellent)/,
-      /stress level is (very_low|low|moderate|high|very_high)/,
-      /energy level is (very_low|low|moderate|high|very_high)/
-    ];
-
-    for (const pattern of wellbeingPatterns) {
-      const match = messageText.match(pattern);
-      if (match) {
-        const level = match[1];
+    // Check if this is a recommendation request
+    if (isRecommendationRequest(lowerMessageText)) {
+      try {
+        const recommendations = await generateRecommendations(message.user_id);
         
-        // Determine which field to update based on pattern
-        let mood: any = 'neutral';
-        let stressLevel: any = 'moderate';
-        let energyLevel: any = 'moderate';
+        if (recommendations.length > 0) {
+          const topRecommendations = recommendations.slice(0, 3); // Show top 3
+          let responseMessage = "Here are your personalized recommendations:\n\n";
+          
+          topRecommendations.forEach((rec, index) => {
+            responseMessage += `${index + 1}. **${rec.title}**\n${rec.description}\n\n`;
+          });
 
-        if (pattern.source.includes('feeling') || pattern.source.includes('mood')) {
-          mood = level;
-        } else if (pattern.source.includes('stress')) {
-          stressLevel = level;
-        } else if (pattern.source.includes('energy')) {
-          energyLevel = level;
+          responseMessage += "Keep tracking your health data for more personalized insights!";
+
+          // Create system response
+          await createChatMessage({
+            user_id: message.user_id,
+            message: responseMessage,
+            message_type: 'system'
+          });
+
+          dataExtracted = true;
+          extractedData.push('recommendations generated');
+        } else {
+          // No recommendations available
+          await createChatMessage({
+            user_id: message.user_id,
+            message: "I don't have enough data yet to provide personalized recommendations. Keep tracking your activities, nutrition, sleep, and wellbeing for a few days, and I'll be able to give you helpful insights!",
+            message_type: 'system'
+          });
+
+          dataExtracted = true;
+          extractedData.push('recommendation request processed');
+        }
+      } catch (error) {
+        console.error('Failed to generate recommendations:', error);
+        await createChatMessage({
+          user_id: message.user_id,
+          message: "I encountered an issue generating your recommendations. Please try again later.",
+          message_type: 'system'
+        });
+      }
+    } else {
+      // Parse different types of data
+      try {
+        // Parse activity data
+        const activities = parseActivityData(lowerMessageText, message.user_id);
+        for (const activity of activities) {
+          await createActivity(activity);
+          extractedData.push(`${activity.activity_type} for ${activity.duration_minutes} minutes`);
+          dataExtracted = true;
         }
 
-        await db.insert(wellbeingTable).values({
-          user_id: message.user_id,
-          mood: mood,
-          stress_level: stressLevel,
-          energy_level: energyLevel,
-          recorded_at: new Date()
-        }).execute();
+        // Parse nutrition data
+        const nutritionEntries = parseNutritionData(lowerMessageText, message.user_id);
+        for (const nutrition of nutritionEntries) {
+          await createNutrition(nutrition);
+          extractedData.push(`${nutrition.meal_type}: ${nutrition.food_item}`);
+          dataExtracted = true;
+        }
 
-        dataExtracted = true;
-        break;
+        // Parse hydration data
+        const hydrationEntries = parseHydrationData(lowerMessageText, message.user_id);
+        for (const hydration of hydrationEntries) {
+          await createHydration(hydration);
+          extractedData.push(`${hydration.amount_ml}ml of ${hydration.beverage_type || 'liquid'}`);
+          dataExtracted = true;
+        }
+
+        // Parse sleep data
+        const sleepEntries = parseSleepData(lowerMessageText, message.user_id);
+        for (const sleep of sleepEntries) {
+          await createSleep(sleep);
+          const duration = Math.round((sleep.wake_time.getTime() - sleep.bedtime.getTime()) / (1000 * 60 * 60) * 10) / 10;
+          extractedData.push(`${duration} hours of sleep${sleep.sleep_quality ? ` (${sleep.sleep_quality} quality)` : ''}`);
+          dataExtracted = true;
+        }
+
+        // Parse wellbeing data
+        const wellbeingEntries = parseWellbeingData(lowerMessageText, message.user_id);
+        for (const wellbeing of wellbeingEntries) {
+          await createWellbeing(wellbeing);
+          extractedData.push(`mood: ${wellbeing.mood}, stress: ${wellbeing.stress_level}, energy: ${wellbeing.energy_level}`);
+          dataExtracted = true;
+        }
+
+        // Create system response based on extracted data
+        if (dataExtracted && extractedData.length > 0) {
+          let responseMessage = "Great! I've logged the following data:\n\n";
+          extractedData.forEach((data, index) => {
+            responseMessage += `• ${data}\n`;
+          });
+          responseMessage += "\nKeep tracking your health journey! 💪";
+
+          await createChatMessage({
+            user_id: message.user_id,
+            message: responseMessage,
+            message_type: 'system'
+          });
+        } else {
+          // No data extracted - general response
+          await createChatMessage({
+            user_id: message.user_id,
+            message: "I received your message! I can help you track activities (like 'I ran for 30 minutes'), nutrition (like 'I had breakfast with oatmeal'), hydration (like 'I drank 500ml of water'), sleep (like 'I slept for 8 hours'), and wellbeing (like 'I'm feeling good today'). You can also ask for recommendations by saying 'give me some advice' or 'what should I do?'",
+            message_type: 'system'
+          });
+        }
+      } catch (error) {
+        console.error('Error processing health data:', error);
+        await createChatMessage({
+          user_id: message.user_id,
+          message: "I encountered an issue processing your health data. Please try rephrasing your message or enter the data directly in the tracking tabs.",
+          message_type: 'system'
+        });
       }
     }
 
