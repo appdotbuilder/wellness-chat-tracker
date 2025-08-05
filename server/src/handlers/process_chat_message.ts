@@ -20,25 +20,35 @@ const parseActivityData = (message: string, userId: number) => {
     notes?: string;
   }> = [];
 
-  // Pattern 1: Duration-based activities
+  // Pattern 1: Duration-based activities - enhanced with more patterns
   const durationPatterns = [
-    { pattern: /ran for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'running', intensity: 'moderate' },
-    { pattern: /walked for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'walking', intensity: 'low' },
-    { pattern: /cycled for (\d+(?:\.\d+)?)\s*(?:hours?|hrs?)/i, type: 'cycling', intensity: 'moderate', isHours: true },
-    { pattern: /cycled for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'cycling', intensity: 'moderate' },
+    { pattern: /(?:went for a |did some |i )?ran for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'running', intensity: 'moderate' },
+    { pattern: /(?:went for a |did some |i )?walked for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'walking', intensity: 'low' },
+    { pattern: /(?:went |did some |i )?cycled for (\d+(?:\.\d+)?)\s*(?:hours?|hrs?)/i, type: 'cycling', intensity: 'moderate', isHours: true },
+    { pattern: /(?:went |did some |i )?cycled for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'cycling', intensity: 'moderate' },
     { pattern: /(?:did|had)\s+a\s+(\d+)(?:-|\s)minute\s+workout/i, type: 'workout', intensity: 'moderate' },
-    { pattern: /exercised for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'exercise', intensity: 'moderate' },
-    { pattern: /swam for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'swimming', intensity: 'high' },
-    { pattern: /worked out for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'workout', intensity: 'moderate' }
+    { pattern: /(?:i )?exercised for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'exercise', intensity: 'moderate' },
+    { pattern: /(?:went |did some |i )?swam for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'swimming', intensity: 'high' },
+    { pattern: /(?:i )?worked out for (\d+(?:\.\d+)?)\s*(?:minutes?|mins?)/i, type: 'workout', intensity: 'moderate' },
+    { pattern: /(\d+(?:\.\d+)?)\s*(?:minutes?|mins?) of (running|walking|cycling|swimming|exercise|workout)/i, type: '$2', intensity: 'moderate', reversed: true }
   ];
 
-  for (const { pattern, type, intensity, isHours } of durationPatterns) {
+  for (const { pattern, type, intensity, isHours, reversed } of durationPatterns) {
     const match = message.match(pattern);
     if (match) {
-      const duration = parseFloat(match[1]);
+      let activityType = type;
+      let duration: number;
+      
+      if (reversed) {
+        duration = parseFloat(match[1]);
+        activityType = match[2]; // activity type is in second group for reversed patterns
+      } else {
+        duration = parseFloat(match[1]);
+      }
+      
       const durationMinutes = isHours ? duration * 60 : duration;
       activities.push({
-        activity_type: type,
+        activity_type: activityType,
         duration_minutes: Math.round(durationMinutes),
         intensity: intensity as 'low' | 'moderate' | 'high',
         notes: `Logged via chat: "${message.trim()}"`
@@ -95,15 +105,17 @@ const parseNutritionData = (message: string, userId: number) => {
     notes?: string;
   }> = [];
 
-  // Pattern 1: Meal descriptions
+  // Pattern 1: Meal descriptions - enhanced with more flexible patterns
   const mealPatterns = [
-    { pattern: /had (breakfast)(\s+with|\s+of)?\s+(.+)/i, mealType: 'breakfast' as const },
+    { pattern: /had (breakfast)(\s+with|\s+of|\s+was|\s+-|\s*:)?\s*(.+)/i, mealType: 'breakfast' as const },
     { pattern: /ate (.+) for (breakfast)/i, mealType: 'breakfast' as const, reversed: true },
-    { pattern: /had (lunch)(\s+with|\s+of)?\s+(.+)/i, mealType: 'lunch' as const },
+    { pattern: /(breakfast)(\s+was|\s*:)\s*(.+)/i, mealType: 'breakfast' as const },
+    { pattern: /had (lunch)(\s+with|\s+of|\s+was|\s+-|\s*:)?\s*(.+)/i, mealType: 'lunch' as const },
     { pattern: /ate (.+) for (lunch)/i, mealType: 'lunch' as const, reversed: true },
-    { pattern: /(?:had |ate )?(?:dinner|supper)(?:\s+was|\s+of)?\s+(.+)/i, mealType: 'dinner' as const, foodGroup: 1 },
+    { pattern: /(lunch)(\s+was|\s*:)\s*(.+)/i, mealType: 'lunch' as const },
+    { pattern: /(?:had |ate )?(?:dinner|supper)(?:\s+was|\s+of|\s+with|\s+-|\s*:)?\s+(.+)/i, mealType: 'dinner' as const, foodGroup: 1 },
     { pattern: /ate (.+) for (?:dinner|supper)/i, mealType: 'dinner' as const, reversed: true },
-    { pattern: /(?:had|ate)\s+a\s+snack:?\s*(.+)/i, mealType: 'snack' as const, foodGroup: 1 },
+    { pattern: /(?:had|ate)\s+(?:a\s+)?snack(?:\s+of|\s+was|\s+-|\s*:)?\s*(.+)/i, mealType: 'snack' as const, foodGroup: 1 },
     { pattern: /snacked on (.+)/i, mealType: 'snack' as const, foodGroup: 1 }
   ];
 
@@ -166,11 +178,11 @@ const parseHydrationData = (message: string, userId: number) => {
     beverage_type?: string;
   }> = [];
 
-  // Pattern 1: Direct ml measurements
+  // Pattern 1: Direct ml measurements - enhanced patterns
   const mlPatterns = [
-    /drank (\d+)ml of (.+)/i,
-    /had (\d+)ml (?:of )?(.+)/i,
-    /consumed (\d+)ml (?:of )?(.+)/i
+    /drank (\d+)\s*ml (?:of )?(.+)/i,
+    /had (\d+)\s*ml (?:of )?(.+)/i,
+    /consumed (\d+)\s*ml (?:of )?(.+)/i
   ];
 
   for (const pattern of mlPatterns) {
@@ -185,10 +197,12 @@ const parseHydrationData = (message: string, userId: number) => {
     }
   }
 
-  // Pattern 2: Liter measurements
+  // Pattern 2: Liter measurements - enhanced patterns
   const literPatterns = [
-    /drank (\d+(?:\.\d+)?)\s*(?:liters?|litres?|l) of (.+)/i,
-    /had (\d+(?:\.\d+)?)\s*(?:liters?|litres?|l) (?:of )?(.+)/i
+    /drank (\d+(?:\.\d+)?)\s*(?:liters?|litres?|l) (?:of )?(.+)/i,
+    /had (\d+(?:\.\d+)?)\s*(?:liters?|litres?|l) (?:of )?(.+)/i,
+    /consumed (\d+(?:\.\d+)?)\s*(?:liters?|litres?|l) (?:of )?(.+)/i,
+    /(\d+(?:\.\d+)?)\s*(?:liters?|litres?|l) (?:of )?(.+)/i
   ];
 
   for (const pattern of literPatterns) {
@@ -338,16 +352,16 @@ const parseWellbeingData = (message: string, userId: number) => {
   let energyLevel: 'very_low' | 'low' | 'moderate' | 'high' | 'very_high' = 'moderate';
   let dataFound = false;
 
-  // Mood patterns
+  // Mood patterns - including 'fair' support with mapping to 'neutral'
   const moodPatterns = [
     { pattern: /feeling (very_poor|very poor|terrible|awful)/i, value: 'very_poor' as const },
     { pattern: /feeling (poor|bad|sad|down)/i, value: 'poor' as const },
-    { pattern: /feeling (neutral|okay|ok|fine|average)/i, value: 'neutral' as const },
+    { pattern: /feeling (neutral|okay|ok|fine|average|fair)/i, value: 'neutral' as const },
     { pattern: /feeling (good|great|happy|positive)/i, value: 'good' as const },
     { pattern: /feeling (excellent|amazing|fantastic|wonderful|very good)/i, value: 'excellent' as const },
     { pattern: /mood is (very_poor|very poor|terrible|awful)/i, value: 'very_poor' as const },
     { pattern: /mood is (poor|bad|sad|down)/i, value: 'poor' as const },
-    { pattern: /mood is (neutral|okay|ok|fine|average)/i, value: 'neutral' as const },
+    { pattern: /mood is (neutral|okay|ok|fine|average|fair)/i, value: 'neutral' as const },
     { pattern: /mood is (good|great|happy|positive)/i, value: 'good' as const },
     { pattern: /mood is (excellent|amazing|fantastic|wonderful|very good)/i, value: 'excellent' as const }
   ];

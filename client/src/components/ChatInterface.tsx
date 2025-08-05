@@ -27,7 +27,8 @@ export function ChatInterface({ userId, onDataUpdate }: ChatInterfaceProps) {
       
       // Auto-send welcome message if chat history is empty
       if (result.length === 0) {
-        await createWelcomeMessage();
+        // Don't await here to avoid blocking the UI
+        createWelcomeMessage();
       }
     } catch (error) {
       console.error('Failed to load messages:', error);

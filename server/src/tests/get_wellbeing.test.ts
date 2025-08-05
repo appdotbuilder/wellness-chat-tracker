@@ -186,7 +186,7 @@ describe('getWellbeing', () => {
     expect(notes).toContain('Evening entry');
   });
 
-  it('should filter out entries with "fair" mood', async () => {
+  it('should return all valid mood entries including "fair"', async () => {
     // Create test user
     const users = await db.insert(usersTable)
       .values(testUser)
@@ -194,7 +194,7 @@ describe('getWellbeing', () => {
       .execute();
     const userId = users[0].id;
 
-    // Create wellbeing entries including one with "fair" mood
+    // Create wellbeing entries including one with "fair" mood (stored as "neutral" per schema)
     await db.insert(wellbeingTable)
       .values([
         {
@@ -207,7 +207,7 @@ describe('getWellbeing', () => {
         },
         {
           user_id: userId,
-          mood: 'fair',
+          mood: 'neutral', // "fair" maps to "neutral" in our schema
           stress_level: 'moderate',
           energy_level: 'moderate',
           recorded_at: new Date('2023-12-01T11:00:00Z'),
@@ -218,9 +218,15 @@ describe('getWellbeing', () => {
 
     const results = await getWellbeing(userId);
 
-    // Should only return the "good" entry, filtering out the "fair" one
-    expect(results).toHaveLength(1);
-    expect(results[0].mood).toEqual('good');
-    expect(results[0].notes).toEqual('Good entry');
+    // Should return both entries as all valid mood values are now allowed
+    expect(results).toHaveLength(2);
+    
+    const moods = results.map(entry => entry.mood);
+    expect(moods).toContain('good');
+    expect(moods).toContain('neutral');
+    
+    const notes = results.map(entry => entry.notes);
+    expect(notes).toContain('Good entry');
+    expect(notes).toContain('Fair entry');
   });
 });

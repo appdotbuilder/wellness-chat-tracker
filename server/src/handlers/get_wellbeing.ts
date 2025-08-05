@@ -34,10 +34,8 @@ export const getWellbeing = async (userId: number, date?: Date): Promise<Wellbei
         .execute();
     }
 
-    // Filter out entries with "fair" mood since it's not in the Zod schema
-    // and map the data to match the expected Wellbeing type
+    // Map the data to match the expected Wellbeing type
     return results
-      .filter(result => result.mood !== 'fair')
       .map(result => ({
         id: result.id,
         user_id: result.user_id,
