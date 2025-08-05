@@ -24,10 +24,37 @@ export function ChatInterface({ userId, onDataUpdate }: ChatInterfaceProps) {
       setIsLoading(true);
       const result = await trpc.getChatMessages.query({ userId, limit: 50 });
       setMessages(result);
+      
+      // Auto-send welcome message if chat history is empty
+      if (result.length === 0) {
+        await createWelcomeMessage();
+      }
     } catch (error) {
       console.error('Failed to load messages:', error);
     } finally {
       setIsLoading(false);
+    }
+  }, [userId]);
+
+  const createWelcomeMessage = useCallback(async () => {
+    try {
+      // First check if user exists by trying to get user data
+      const user = await trpc.getUser.query(userId);
+      
+      // Only create welcome message if user exists
+      if (user) {
+        const welcomeMessage = await trpc.createChatMessage.mutate({
+          user_id: userId,
+          message: "Hello! I'm your wellness assistant. How can I help you today? You can tell me about your activities, meals, hydration, sleep, or how you're feeling - I'll automatically track everything for you! Try saying things like 'I ran for 30 minutes', 'I had a salad for lunch', or 'I drank 2 glasses of water'.",
+          message_type: 'system'
+        });
+        
+        // Update local state immediately to display the welcome message
+        setMessages((prev: ChatMessage[]) => [...prev, welcomeMessage]);
+      }
+    } catch (error) {
+      console.error('Failed to create welcome message:', error);
+      // Don't throw error, just log it - this is expected if user doesn't exist yet
     }
   }, [userId]);
 
@@ -115,16 +142,9 @@ export function ChatInterface({ userId, onDataUpdate }: ChatInterfaceProps) {
           </div>
         ) : messages.length === 0 ? (
           <div className="text-center text-gray-500 py-8">
-            <p className="text-lg mb-2">👋 Welcome to your wellness chat!</p>
-            <p className="text-sm">
-              Tell me about your day, workouts, meals, or how you're feeling, and I'll help track everything for you.
-            </p>
-            <div className="mt-4 text-xs text-gray-400 space-y-1">
-              <p>Try saying things like:</p>
-              <p>"I ran for 30 minutes this morning"</p>
-              <p>"I had a chicken salad for lunch"</p>
-              <p>"I drank 2 glasses of water"</p>
-              <p>"I slept 8 hours last night"</p>
+            <div className="flex items-center justify-center">
+              <Loader2 className="h-4 w-4 animate-spin mr-2" />
+              <p className="text-sm">Setting up your wellness chat...</p>
             </div>
           </div>
         ) : (

@@ -29,17 +29,29 @@ function App() {
   const loadUserData = useCallback(async () => {
     try {
       const userData = await trpc.getUser.query(USER_ID);
+      
+      // Check if user exists
+      if (!userData) {
+        // User doesn't exist, show onboarding
+        setShowOnboarding(true);
+        setIsLoading(false);
+        return;
+      }
+      
       setUser(userData);
       
-      if (userData && !userData.onboarding_completed) {
+      if (!userData.onboarding_completed) {
         setShowOnboarding(true);
+        setIsLoading(false);
+        return;
       }
 
+      // Load dashboard data only if user exists and onboarding is completed
       const dashboard = await trpc.getDashboardData.query(USER_ID);
       setDashboardData(dashboard);
     } catch (error) {
       console.error('Failed to load user data:', error);
-      // If user doesn't exist, show onboarding
+      // If there's an error, show onboarding
       setShowOnboarding(true);
     } finally {
       setIsLoading(false);
